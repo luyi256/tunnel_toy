@@ -9,26 +9,25 @@ import sys
 import traceback
 SOCKS_VER = 5
 
-async def handle_local(reader, remote_writer):
+async def handle_local(reader, remote_writer,writer):
     while True:
         req_data = await reader.read(4096)
-        # print(req_data)
         req_data = decrypt(req_data)
         if not req_data:
             return
-        # client_addr=writer.get_extra_info('peername')
-        # print('client {} want: {}'.format(client_addr,req_data[0:8]))
+        client_addr=writer.get_extra_info('peername')
+        print('client {} want: {}'.format(client_addr,req_data[0:8]))
         remote_writer.write(req_data)
         await remote_writer.drain()
 
-async def handle_remote(writer, remote_reader):
+async def handle_remote(writer, remote_reader,remote_writer):
     while True:
         resp_data = await remote_reader.read(4096)
         # print(resp_data[0:8])
         if not resp_data:                                                                                                            
             return
-        # server_addr=remote_writer.get_extra_info('peername')
-        # print('server {} resp: {}'.format(server_addr,resp_data[0:8]))
+        server_addr=remote_writer.get_extra_info('peername')
+        print('server {} resp: {}'.format(server_addr,resp_data[0:8]))
         resp_data = encrypt(resp_data)
         writer.write(resp_data)
         await writer.drain()
@@ -42,15 +41,15 @@ def decrypt(data):
     return data
 
 async def handle(reader, writer):
-    if args.protocal == 'socks5':
-        data = await reader.read(3)
+    first_byte=await reader.read(1)
+    if first_byte == b'\x05':
+        data = await reader.read(2)
         print(f"receive {data}")
         message = decrypt(data)
         addr = writer.get_extra_info('peername')
         print(f"Request from local: {addr[1]!r}")
 
-        version, nmethods, method_1 = struct.unpack("!BBB", message)
-        assert version == SOCKS_VER
+        nmethods, method_1 = struct.unpack("!BB", message)
         assert nmethods > 0
         assert method_1 == 0
 
@@ -67,7 +66,6 @@ async def handle(reader, writer):
         ipv6_len = 16
         port_len = 2
         temp_pos = 0
-
         header = message[temp_pos:temp_pos + header_len]
         temp_pos = temp_pos + header_len
         ver, cmd, _, atyp = struct.unpack("!BBBB", header)
@@ -90,56 +88,61 @@ async def handle(reader, writer):
             return
         try:
             if cmd == 1:
-                remote_reader, remote_writer = await asyncio.open_connection(remote_addr, remote_port[0])
-                print('Connected to {} {}'.format(remote_addr, remote_port[0]))
-                bind_addr = remote_writer.get_extra_info('sockname')
-                print('Bind addr: {}'.format(bind_addr))
-                try:
-                    bind_ip = struct.unpack("!I", socket.inet_aton(bind_addr[0]))[0]
-                except socket.error:
-                    return
-                bind_port = bind_addr[1]
-                resp = struct.pack('!BBBBIH', SOCKS_VER, 0, 0, 1, bind_ip, bind_port)
-                print('respon to client: {}'.format(resp))
+                remote_reader, remote_writer = await asyncio.open_connection(args.remote_server_ip, args.remote_server_port)
+                print('Connected to remote server')
+                remote_writer.write(f'{bytes.decode(remote_addr)}:{remote_port[0]}\r\n'.encode())
+                await remote_writer.drain()
+                # bind_addr = remote_writer.get_extra_info('sockname')
+                # print('Bind addr: {}'.format(bind_addr))
+                # try:
+                #     bind_ip = struct.unpack("!I", socket.inet_aton(bind_addr[0]))[0]
+                # except socket.error:
+                #     return
+                # bind_port = bind_addr[1]
+                bind_ip = struct.unpack("!I", socket.inet_aton(args.remote_server_ip))[0]
+                resp = struct.pack('!BBBBIH', SOCKS_VER, 0, 0, 1, bind_ip,int(args.remote_server_port))
             else:
                 resp = "\x05\x07\x00\x01"
                 print('command not supported')
-        except:
-            resp = '\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00'
+        except Exception as exc:
+            print(exc)
+            resp = '\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00'.encode()
         resp = encrypt(resp)
+        print('respon to client: {}'.format(resp))
         writer.write(resp)
         await writer.drain()
         if resp[1] == 0 and cmd == 1:
             try:
-                await asyncio.gather(handle_local(reader, remote_writer), handle_remote(writer, remote_reader))
+                await asyncio.gather(handle_local(reader, remote_writer,writer), handle_remote(writer, remote_reader,remote_writer))
             except (ConnectionResetError):
                 writer.close()
                 remote_writer.close()
-    elif args.protocal == 'http':
+    else:
         req = await reader.readline()
         req = bytes.decode(req)
         addr = req.split(" ")
         addr = addr[1].split(":")
         host, port = addr[0], addr[1]
-        print(f'receive from {host} {port}')
-        remote_reader, remote_writer = await asyncio.open_connection(host, port)
+        remote_reader, remote_writer = await asyncio.open_connection(args.remote_server_ip, args.remote_server_port)
+        print('Connected to remote server')
+        remote_writer.write(f'{host}:{port}\r\n'.encode())
+        await remote_writer.drain()
         print(f'connect to {host} {port}')
         writer.write('HTTP/1.1 200 Connection Established\r\n\r\n'.encode())
         await writer.drain()
         data = await reader.read(4096)
-        print(data) 
+        #print(data)
         try:
-            await asyncio.gather(handle_local(reader, remote_writer), handle_remote(writer, remote_reader))
+            await asyncio.gather(handle_local(reader, remote_writer,writer), handle_remote(writer, remote_reader,remote_writer))
         except Exception:
             writer.close()
             remote_writer.close()
 
 async def main():
     server = await asyncio.start_server(
-        handle, host=args.listenHost, port=args.listenPort)
+        handle, host=args.listen_ip, port=args.listen_port)
     addr = server.sockets[0].getsockname()
     logger.info(f'Serving on {addr}')
-
     async with server:
         await server.serve_forever()
 
@@ -152,17 +155,18 @@ if __name__ == '__main__':
     # logging
     logger = logging.getLogger(__name__)
     logger.setLevel(level=logging.DEBUG)
-    handler = logging.FileHandler('server.log')
+    handler = logging.FileHandler('local_server.log')
     formatter = logging.Formatter('%(asctime)s - %(funcName)s - %(levelname)s - %(message)s')
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
     # parser
-    _parser = argparse.ArgumentParser(description='socks5 server')
+    _parser = argparse.ArgumentParser(description='server')
     _parser.add_argument('--exc', dest='logExc', default=False, action='store_true', help='show exception traceback')
-    _parser.add_argument('--host', dest='listenHost', metavar='listen_host', help='proxy listen host default listen all interfaces')
-    _parser.add_argument('--port', dest='listenPort', metavar='listen_port', required=True, help='proxy listen port')
-    _parser.add_argument('--protocal',dest='protocal',metavar='protocal',required=True,help='protocal: socks5 or http')
+    _parser.add_argument('--listen_ip', dest='listen_ip', metavar='listen_host', help='proxy listen host default listen all interfaces')
+    _parser.add_argument('--listen_port', dest='listen_port', metavar='listen_port', required=True, help='proxy listen port')
+    _parser.add_argument('--remote_ip', dest='remote_server_ip', metavar='remote_server_ip', required=True,help='remote server ip')
+    _parser.add_argument('--remote_port', dest='remote_server_port', metavar='remote_server_port', required=True, help='remote server port')
     args = _parser.parse_args()
 
     if sys.platform == 'win32':
