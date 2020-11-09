@@ -12,11 +12,10 @@ SOCKS_VER = 5
 async def handle_local(reader, remote_writer,writer):
     while True:
         req_data = await reader.read(4096)
-        req_data = decrypt(req_data)
         if not req_data:
             return
         client_addr=writer.get_extra_info('peername')
-        print('client {} want: {}'.format(client_addr,req_data[0:8]))
+        # print('client {} want: {}'.format(client_addr,req_data[0:8]))
         remote_writer.write(req_data)
         await remote_writer.drain()
 
@@ -27,25 +26,15 @@ async def handle_remote(writer, remote_reader,remote_writer):
         if not resp_data:                                                                                                            
             return
         server_addr=remote_writer.get_extra_info('peername')
-        print('server {} resp: {}'.format(server_addr,resp_data[0:8]))
-        resp_data = encrypt(resp_data)
+        # print('server {} resp: {}'.format(server_addr,resp_data[0:8]))
         writer.write(resp_data)
         await writer.drain()
-    
-def encrypt(data):
-    # return data.translate(encrypt_table)
-    return data
-
-def decrypt(data):
-    # return data.translate(decrypt_table)
-    return data
 
 async def handle(reader, writer):
     first_byte=await reader.read(1)
     if first_byte == b'\x05':
         data = await reader.read(2)
         print(f"receive {data}")
-        message = decrypt(data)
         addr = writer.get_extra_info('peername')
         print(f"Request from local: {addr[1]!r}")
 
@@ -54,13 +43,11 @@ async def handle(reader, writer):
         assert method_1 == 0
 
         resp_data = struct.pack("!BB", SOCKS_VER, 0)
-        resp_message = encrypt(resp_data)
         writer.write(resp_message)
         await writer.drain()
 
         data = await reader.read(4096)
         print(f"then receive {data}")
-        message = decrypt(data)
         header_len = 4
         ipv4_len = 4
         ipv6_len = 16
@@ -107,7 +94,6 @@ async def handle(reader, writer):
         except Exception as exc:
             print(exc)
             resp = '\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00'.encode()
-        resp = encrypt(resp)
         print('respon to client: {}'.format(resp))
         writer.write(resp)
         await writer.drain()
