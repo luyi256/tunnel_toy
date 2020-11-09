@@ -15,18 +15,18 @@ async def handle_local(reader, remote_writer,writer):
         if not req_data:
             return
         client_addr=writer.get_extra_info('peername')
-        # print('client {} want: {}'.format(client_addr,req_data[0:8]))
+        logger.debug('client {} want: {}'.format(client_addr,req_data[0:8]))
         remote_writer.write(req_data)
         await remote_writer.drain()
 
 async def handle_remote(writer, remote_reader,remote_writer):
     while True:
         resp_data = await remote_reader.read(4096)
-        # print(resp_data[0:8])
+        logger.debug(resp_data[0:8])
         if not resp_data:                                                                                                            
             return
         server_addr=remote_writer.get_extra_info('peername')
-        # print('server {} resp: {}'.format(server_addr,resp_data[0:8]))
+        logger.debug('server {} resp: {}'.format(server_addr,resp_data[0:8]))
         writer.write(resp_data)
         await writer.drain()
 
@@ -34,49 +34,48 @@ async def handle(reader, writer):
     first_byte=await reader.read(1)
     if first_byte == b'\x05':
         data = await reader.read(2)
-        print(f"receive {data}")
+        logger.debug(f"receive {data}")
         addr = writer.get_extra_info('peername')
-        print(f"Request from local: {addr[1]!r}")
+        logger.info(f"Request from local: {addr[1]!r}")
 
-        nmethods, method_1 = struct.unpack("!BB", message)
+        nmethods, method_1 = struct.unpack("!BB", data)
         assert nmethods > 0
         assert method_1 == 0
 
         resp_data = struct.pack("!BB", SOCKS_VER, 0)
-        writer.write(resp_message)
+        writer.write(resp_data)
         await writer.drain()
 
         data = await reader.read(4096)
-        print(f"then receive {data}")
         header_len = 4
         ipv4_len = 4
         ipv6_len = 16
         port_len = 2
         temp_pos = 0
-        header = message[temp_pos:temp_pos + header_len]
+        header = data[temp_pos:temp_pos + header_len]
         temp_pos = temp_pos + header_len
-        ver, cmd, _, atyp = struct.unpack("!BBBB", header)
+        ver,cmd, _, atyp = struct.unpack("!BBBB", header)
         assert ver == SOCKS_VER
         if atyp == 1: # IPv4
-            remote_addr = socket.inet_ntoa(message[temp_pos:temp_pos + ipv4_len])
+            remote_addr = socket.inet_ntoa(data[temp_pos:temp_pos + ipv4_len])
             temp_pos = temp_pos + ipv4_len
-            remote_port = struct.unpack('!H', message[temp_pos:temp_pos + port_len])
+            remote_port = struct.unpack('!H', data[temp_pos:temp_pos + port_len])
         elif atyp == 3: # domain
-            domain_len = message[temp_pos]
+            domain_len = data[temp_pos]
             temp_pos = temp_pos + 1
-            remote_addr = message[temp_pos:temp_pos + domain_len]
+            remote_addr = data[temp_pos:temp_pos + domain_len]
             temp_pos = temp_pos + domain_len
-            remote_port = struct.unpack('!H', message[temp_pos:temp_pos + port_len])
+            remote_port = struct.unpack('!H', data[temp_pos:temp_pos + port_len])
         elif atyp == 4:  # IPv6
-            remote_addr = socket.inet_ntop(socket.AF_INET6, message[temp_pos:temp_pos + ipv6_len])
+            remote_addr = socket.inet_ntop(socket.AF_INET6, data[temp_pos:temp_pos + ipv6_len])
             temp_pos = temp_pos + ipv6_len
-            remote_port = struct.unpack('!H', message[temp_pos:temp_pos + port_len])
+            remote_port = struct.unpack('!H', data[temp_pos:temp_pos + port_len])
         else:
             return
         try:
             if cmd == 1:
                 remote_reader, remote_writer = await asyncio.open_connection(args.remote_server_ip, args.remote_server_port)
-                print('Connected to remote server')
+                logger.info('Connected to remote server')
                 remote_writer.write(f'{bytes.decode(remote_addr)}:{remote_port[0]}\r\n'.encode())
                 await remote_writer.drain()
                 # bind_addr = remote_writer.get_extra_info('sockname')
@@ -90,11 +89,11 @@ async def handle(reader, writer):
                 resp = struct.pack('!BBBBIH', SOCKS_VER, 0, 0, 1, bind_ip,int(args.remote_server_port))
             else:
                 resp = "\x05\x07\x00\x01"
-                print('command not supported')
+                logger.error('command not supported')
         except Exception as exc:
             print(exc)
             resp = '\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00'.encode()
-        print('respon to client: {}'.format(resp))
+        logger.debug('respon to client: {}'.format(resp))
         writer.write(resp)
         await writer.drain()
         if resp[1] == 0 and cmd == 1:
@@ -110,10 +109,10 @@ async def handle(reader, writer):
         addr = addr[1].split(":")
         host, port = addr[0], addr[1]
         remote_reader, remote_writer = await asyncio.open_connection(args.remote_server_ip, args.remote_server_port)
-        print('Connected to remote server')
+        logger.debug('Connected to remote server')
         remote_writer.write(f'{host}:{port}\r\n'.encode())
         await remote_writer.drain()
-        print(f'connect to {host} {port}')
+        logger.info(f'connect to {host} {port}')
         writer.write('HTTP/1.1 200 Connection Established\r\n\r\n'.encode())
         await writer.drain()
         data = await reader.read(4096)
@@ -140,9 +139,9 @@ if __name__ == '__main__':
     
     # logging
     logger = logging.getLogger(__name__)
-    logger.setLevel(level=logging.DEBUG)
+    logger.setLevel(level=logging.INFO)
     handler = logging.FileHandler('local_server.log')
-    formatter = logging.Formatter('%(asctime)s - %(funcName)s - %(levelname)s - %(message)s')
+    formatter = logging.Formatter('%(asctime)s %(levelname).1s %(lineno)-3d %(funcName)-20s %(message)s')
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 

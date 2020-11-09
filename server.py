@@ -153,7 +153,7 @@ if __name__ == '__main__':
     logger = logging.getLogger(__name__)
     logger.setLevel(level=logging.DEBUG)
     handler = logging.FileHandler('server.log')
-    formatter = logging.Formatter('%(asctime)s - %(funcName)s - %(levelname)s - %(message)s')
+    formatter = logging.Formatter('%(asctime)s %(levelname).1s %(lineno)-3d %(funcName)-20s %(message)s', datefmt='%H:%M:%S')
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 

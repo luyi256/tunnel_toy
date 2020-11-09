@@ -15,7 +15,7 @@ async def handle_local(reader, remote_writer,writer):
         if not req_data:
             return
         client_addr=writer.get_extra_info('peername')
-        print('client {} want: {}'.format(client_addr,req_data[0:8]))
+        # print('client {} want: {}'.format(client_addr,req_data[0:8]))
         remote_writer.write(req_data)
         await remote_writer.drain()
 
@@ -25,7 +25,7 @@ async def handle_remote(writer, remote_reader,remote_writer):
         if not resp_data:                                                                                                            
             return
         server_addr=remote_writer.get_extra_info('peername')
-        print('server {} resp: {}'.format(server_addr,resp_data[0:8]))
+        # print('server {} resp: {}'.format(server_addr,resp_data[0:8]))
         writer.write(resp_data)
         await writer.drain()
 
@@ -33,14 +33,14 @@ async def handle(reader, writer):
     req = await reader.readline()
     req = bytes.decode(req)
     addr = req[:-2].split(":")
-    print(f'remote server receive request {req[:-2]}')
+    logger.info(f'remote server receive request {req[:-2]}')
     host, port = addr[0], int(addr[1])
     remote_reader, remote_writer = await asyncio.open_connection(host, port)
-    print(f'connect to {host} {port}')
+    # print(f'connect to {host} {port}')
     try:
         await asyncio.gather(handle_local(reader, remote_writer,writer), handle_remote(writer, remote_reader,remote_writer))
     except Exception as exc:
-        print(exc)
+        logger.info(exc)
         writer.close()
         remote_writer.close()
 
@@ -58,9 +58,9 @@ if __name__ == '__main__':
     
     # logging
     logger = logging.getLogger(__name__)
-    logger.setLevel(level=logging.DEBUG)
+    logger.setLevel(level=logging.INFO)
     handler = logging.FileHandler('remote_server.log')
-    formatter = logging.Formatter('%(asctime)s - %(funcName)s - %(levelname)s - %(message)s')
+    formatter = logging.Formatter('%(asctime)s %(levelname).1s %(lineno)-3d %(funcName)-20s %(message)s', datefmt='%H:%M:%S')
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
