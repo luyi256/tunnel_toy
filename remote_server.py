@@ -1,5 +1,6 @@
 import asyncio
 import struct
+import aiosqlite3
 import socket
 import hashlib
 import signal
@@ -9,13 +10,17 @@ import sys
 import traceback
 SOCKS_VER = 5
 
+def logExc(exc):
+    if args.logExc:
+        log.error(f'{traceback.format_exc()}')
+
 async def handle_local(reader, remote_writer,writer):
     while True:
         req_data = await reader.read(4096)
         if not req_data:
             return
         client_addr=writer.get_extra_info('peername')
-        # print('client {} want: {}'.format(client_addr,req_data[0:8]))
+        logger.debug('client {} want: {}'.format(client_addr,req_data[0:8]))
         remote_writer.write(req_data)
         await remote_writer.drain()
 
@@ -25,7 +30,7 @@ async def handle_remote(writer, remote_reader,remote_writer):
         if not resp_data:                                                                                                            
             return
         server_addr=remote_writer.get_extra_info('peername')
-        # print('server {} resp: {}'.format(server_addr,resp_data[0:8]))
+        logger.debug('server {} resp: {}'.format(server_addr,resp_data[0:8]))
         writer.write(resp_data)
         await writer.drain()
 
@@ -35,16 +40,28 @@ async def handle(reader, writer):
     addr = req[:-2].split(":")
     logger.info(f'remote server receive request {req[:-2]}')
     host, port = addr[0], int(addr[1])
+    username, password = addr[2], addr[3]
+    cursor = await db.execute("select password from user where username='%s'" % username)
+    row = await cursor.fetchone()
+    assert password==row[0]
     remote_reader, remote_writer = await asyncio.open_connection(host, port)
-    # print(f'connect to {host} {port}')
+    bind_host, bind_port, *_ = remote_writer.get_extra_info('sockname')
+    logger.debug(f'connect to {host}:{port}, with {bind_host}:{bind_port}')
+    writer.write(f'{bind_host}:{bind_port}\r\n'.encode())
+    await writer.drain()
     try:
         await asyncio.gather(handle_local(reader, remote_writer,writer), handle_remote(writer, remote_reader,remote_writer))
     except Exception as exc:
-        logger.info(exc)
+        logExc(exc)
         writer.close()
         remote_writer.close()
 
 async def main():
+    global db
+    db=await aiosqlite3.connect("user.db")
+    cursor=await db.execute("select * from user")
+    row = await cursor.fetchone()
+    print(row)
     server = await asyncio.start_server(
         handle, host=args.listen_host, port=args.listen_port)
     addr = server.sockets[0].getsockname()
@@ -58,12 +75,13 @@ if __name__ == '__main__':
     
     # logging
     logger = logging.getLogger(__name__)
-    logger.setLevel(level=logging.INFO)
+    logger.setLevel(level=logging.DEBUG)
     handler = logging.FileHandler('remote_server.log')
-    formatter = logging.Formatter('%(asctime)s %(levelname).1s %(lineno)-3d %(funcName)-20s %(message)s', datefmt='%H:%M:%S')
+    formatter = logging.Formatter('%(asctime)s %(levelname).1s %(lineno)-3d %(funcName)-20s %(message)s')
     handler.setFormatter(formatter)
     logger.addHandler(handler)
-
+    chlr = logging.StreamHandler()
+    logger.addHandler(chlr)
     # parser
     _parser = argparse.ArgumentParser(description='server')
     _parser.add_argument('--exc', dest='logExc', default=False, action='store_true', help='show exception traceback')
