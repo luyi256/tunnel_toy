@@ -1,3 +1,4 @@
+from enum import Enum
 import asyncio
 import struct
 import aiosqlite3
@@ -10,32 +11,86 @@ import sys
 import traceback
 SOCKS_VER = 5
 
+READ_MODE = Enum(
+    'readmode', ('EXACT', 'LINE', 'MAX', 'UNTIL')
+)
+
+
+class program_err(Exception):
+    print(Exception)
+
+
 def logExc(exc):
     if args.logExc:
-        log.error(f'{traceback.format_exc()}')
+        logger.error(f'{traceback.format_exc()}')
 
-async def handle_local(reader, remote_writer,writer):
-    while True:
-        req_data = await reader.read(4096)
-        if not req_data:
-            return
-        client_addr=writer.get_extra_info('peername')
-        logger.debug('client {} want: {}'.format(client_addr,req_data[0:8]))
-        remote_writer.write(req_data)
-        await remote_writer.drain()
 
-async def handle_remote(writer, remote_reader,remote_writer):
+async def handle_local(client_reader, remote_writer, client_writer):
     while True:
-        resp_data = await remote_reader.read(4096)
-        if not resp_data:                                                                                                            
-            return
-        server_addr=remote_writer.get_extra_info('peername')
-        logger.debug('server {} resp: {}'.format(server_addr,resp_data[0:8]))
-        writer.write(resp_data)
+        try:
+            req_data = await aio_read(client_reader, READ_MODE.MAX, read_len=4096)
+            if not req_data:
+                return
+            client_addr = client_writer.get_extra_info('peername')
+            logger.debug('client {} want: {}'.format(client_addr, req_data[0:8]))
+            await aio_write(remote_writer,req_data)
+        except Exception as exc:
+            logger.debug(exc)
+
+
+async def handle_remote(client_writer, remote_reader, remote_writer):
+    while True:
+        try:
+            resp_data = await aio_read(remote_reader, READ_MODE.MAX, read_len=4096)
+            if not resp_data:
+                return
+            server_addr = remote_writer.get_extra_info('peername')
+            logger.debug('server {} resp: {}'.format(server_addr, resp_data[0:8]))
+            await aio_write(client_writer,resp_data)
+        except Exception as exc:
+            logger.debug(exc)
+
+
+async def aio_read(reader, read_mode, *, log_hint=None, exact_data=None, read_len=None, until_str=b'\r\n'):
+    data = None
+    try:
+        if read_mode == READ_MODE.EXACT:
+            if exact_data:
+                read_len = len(exact_data)
+            data = await reader.readexactly(read_len)
+            if exact_data and data != exact_data:
+                raise program_err(
+                    f'ERR={data}, it should be {exact_data}, {log_hint}')
+        elif read_mode == READ_MODE.LINE:
+            data = await reader.readline()
+        elif read_mode == READ_MODE.MAX:
+            data = await reader.read(read_len)
+        elif read_mode == READ_MODE.UNTIL:
+            data = await reader.readuntil(until_str)
+        else:
+            logger.error(f'invalid mode={read_mode}')
+            exit(1)
+    except asyncio.IncompleteReadError as exc:
+        raise program_err(f'EXC={exc} {log_hint}')
+    except ConnectionResetError as exc:
+        raise program_err(f'EXC={exc} {log_hint}')
+    except ConnectionAbortedError as exc:
+        raise program_err(f'EXC={exc} {log_hint}')
+    if not data:
+        raise program_err(f'find EOF when read {log_hint}')
+    return data
+
+async def aio_write(writer, data=None, *, log_hint=None):
+    try:
+        writer.write(data)
         await writer.drain()
+    except ConnectionAbortedError as exc:
+        raise program_errk(f'EXC={exc} {log_hint}')
+    except Exception as exc:
+        logger.debug(exc)
 
-async def handle(reader, writer):
-    req = await reader.readline()
+async def handle(client_reader, client_writer):
+    req = await aio_read(client_reader,READ_MODE.LINE,log_hint='recv req')
     req = bytes.decode(req)
     addr = req[:-2].split()
     logger.info(f'remote server receive request {req[:-2]}')
@@ -47,13 +102,12 @@ async def handle(reader, writer):
     remote_reader, remote_writer = await asyncio.open_connection(host, port)
     bind_host, bind_port, *_ = remote_writer.get_extra_info('sockname')
     logger.debug(f'connect to {host} {port}, with {bind_host} {bind_port}')
-    writer.write(f'{bind_host} {bind_port}\r\n'.encode())
-    await writer.drain()
+    await aio_write(client_writer,f'{bind_host} {bind_port}\r\n'.encode())
     try:
-        await asyncio.gather(handle_local(reader, remote_writer,writer), handle_remote(writer, remote_reader,remote_writer))
+        await asyncio.gather(handle_local(client_reader, remote_writer,client_writer), handle_remote(client_writer, remote_reader,remote_writer))
     except Exception as exc:
         logExc(exc)
-        writer.close()
+        client_writer.close()
         remote_writer.close()
 
 async def main():
