@@ -28,13 +28,12 @@ def logExc(exc):
 async def handle_local(client_reader, remote_writer, client_writer):
     while True:
         try:
-            req_data = await client_reader.read(4096)
+            req_data = await aio_read(client_reader, READ_MODE.MAX, read_len=4096)
             if not req_data:
                 return
             client_addr = client_writer.get_extra_info('peername')
             logger.debug('client {} want: {}'.format(client_addr, req_data[0:8]))
-            remote_writer.write(req_data)
-            await remote_writer.drain()
+            await aio_write(remote_writer,req_data)
         except Exception as exc:
             logger.debug(exc)
 
@@ -42,14 +41,12 @@ async def handle_local(client_reader, remote_writer, client_writer):
 async def handle_remote(client_writer, remote_reader, remote_writer):
     while True:
         try:
-            resp_data = await remote_reader.read(4096)
-            logger.debug(resp_data[0:8])
+            resp_data = await aio_read(remote_reader, READ_MODE.MAX, read_len=4096)
             if not resp_data:
                 return
             server_addr = remote_writer.get_extra_info('peername')
             logger.debug('server {} resp: {}'.format(server_addr, resp_data[0:8]))
-            client_writer.write(resp_data)
-            await client_writer.drain()
+            await aio_write(client_writer,resp_data)
         except Exception as exc:
             logger.debug(exc)
 
@@ -96,8 +93,8 @@ async def aio_write(writer, data=None, *, log_hint=None):
 async def handle(client_reader, client_writer):
     client_host, client_port, *_ = client_writer.get_extra_info('peername')
     logger.info(f'Request from local: {client_host} {client_port}')
-    first_byte = await aio_read(client_reader, READ_MODE.EXACT, read_len=1, log_hint=f'first byte from {client_host}:{client_port}')
-    # SOCK5 部分
+    first_byte = await aio_read(client_reader, READ_MODE.EXACT, read_len=1, log_hint=f'first byte from {client_host} {client_port}')
+    log_hint=f'{client_host} {client_port}'
     remote_host = None
     remote_port=None
     try:
@@ -123,72 +120,63 @@ async def handle(client_reader, client_writer):
                 raise program_err(f'invalid atyp')
             remote_port = await aio_read(client_reader, READ_MODE.EXACT, read_len=2, log_hint='port')
             remote_port = int.from_bytes(remote_port, 'big')            
-            log_hint = f'{client_host}:{client_port}'
-            logger.info(f'{log_hint} connect to {remote_host}:{remote_port}')
-
-            remote_reader, remote_writer = await asyncio.open_connection(args.remote_server_ip, args.remote_server_port)
-            logger.info('Connected to remote server')
-            await aio_write(remote_writer, f'{remote_host}:{remote_port}:{args.username}:{password}\r\n'.encode(),
-                log_hint=f'{log_hint} connect to remote server, {remote_host}:{remote_port}')
-            reply_bindaddr = await aio_read(remote_reader, READ_MODE.LINE, log_hint='remote server reply the bind addr')
-            reply_bindaddr = bytes.decode(reply_bindaddr)
-            addr = reply_bindaddr[:-2].split(":")
-            bind_host, bind_port=addr[0],int(addr[1])
-            logger.info(f'{log_hint} bind at {bind_host}:{bind_port}')
-            if proxy_protocal == 'SOCKS5':
-                bind_domain=bind_host
-                bind_host = ipaddress.ip_address(bind_host)
-                atyp = b'\x03'
-                host_data=None
-                try:
-                    if bind_host.version == 4:
-                        atyp = b'\01'
-                        host_data = struct.pack('!L', int(bind_host))
-                    else:
-                        atyp = b'\x04'
-                        host_data = struct.pack('!16s', ipaddress.v6_int_to_packed(int(bind_host)))
-                except Exception as exc:
-                    host_data = struct.pack(f'!B{len(bind_domain)}s', len(bind_domain), bind_domain.encode())
-                reply_data = struct.pack(f'!ssss{len(host_data)}sH', b'\x05', b'\x00', b'\x00', atyp, host_data, bind_port)
-                logger.debug(reply_data)
-                await aio_write(client_writer, reply_data, log_hint='reply the bind addr')  
-                try:
-                    await asyncio.gather(handle_local(client_reader, remote_writer, client_writer), handle_remote(client_writer, remote_reader, remote_writer))
-                except Exception as exc:
-                    logExc(exc)
-                    logger.info(exc)
-                    client_writer.close()
-                    remote_writer.close()
-                    
         else:
-            req = await client_reader.readline()
-            req = bytes.decode(req)
-            addr = req.split(" ")
-            addr = addr[1].split(":")
-            host, port = addr[0], addr[1]
-            remote_reader, remote_writer = await asyncio.open_connection(args.remote_server_ip, args.remote_server_port)
-            logger.debug('Connected to remote server')
-            remote_writer.write(
-                f'{host}:{port}:{args.username}:{password}\r\n'.encode())
-            await remote_writer.drain()
-            logger.info(f'connect to {host} {port}')
-            client_writer.write(
-                'HTTP/1.1 200 Connection Established\r\n\r\n'.encode())
-            await client_writer.drain()
-            data = await client_reader.read(4096)
+            req = await aio_read(client_reader, READ_MODE.LINE, log_hint='http request')
+            req = bytes.decode(first_byte+req)
+            method, uri, protocal, *_ = req.split()
+            if method.lower() == 'connect':
+                proxy_protocal = 'HTTPS'
+                log_hint=f'{log_hint} {proxy_protocal}'
+                remote_host, remote_port, *_ = uri.split(':')
+                await aio_read(client_reader, READ_MODE.UNTIL, until_str=b'\r\n\r\n', log_hint='message left')
+            else:
+                raise program_err(f'cannot server the request {req.split()}')
+        
+        logger.info(f'{log_hint} connect to {remote_host} {remote_port}')
+
+        remote_reader, remote_writer = await asyncio.open_connection(args.remote_server_ip, args.remote_server_port)
+        await aio_write(remote_writer, f'{remote_host} {remote_port} {args.username} {password}\r\n'.encode(),
+            log_hint=f'{log_hint} connect to remote server, {remote_host} {remote_port}')
+        reply_bindaddr = await aio_read(remote_reader, READ_MODE.LINE, log_hint='remote server reply the bind addr')
+        reply_bindaddr = bytes.decode(reply_bindaddr)
+        addr = reply_bindaddr[:-2].split()
+        bind_host, bind_port=addr[0],addr[1]
+        logger.info(f'{log_hint} bind at {bind_host} {bind_port}')
+        if proxy_protocal == 'SOCKS5':
+            bind_domain=bind_host
+            bind_host = ipaddress.ip_address(bind_host)
+            atyp = b'\x03'
+            host_data=None
             try:
-                await asyncio.gather(handle_local(client_reader, remote_writer, client_writer), handle_remote(client_writer, remote_reader, remote_writer))
+                if bind_host.version == 4:
+                    atyp = b'\x01'
+                    host_data = struct.pack('!L', int(bind_host))
+                else:
+                    atyp = b'\x04'
+                    host_data = struct.pack('!16s', ipaddress.v6_int_to_packed(int(bind_host)))
             except Exception as exc:
+                host_data = struct.pack(f'!B{len(bind_domain)}s', len(bind_domain), bind_domain.encode())
+            reply_data = struct.pack(f'!ssss{len(host_data)}sH', b'\x05', b'\x00', b'\x00', atyp, host_data, bind_port)
+            await aio_write(client_writer, reply_data, log_hint='reply the bind addr')  
+        else:
+            await aio_write(client_writer, f'{protocal} 200 OK\r\n\r\n'.encode(), log_hint='response to HTTPS')
+            
+        try:
+            await asyncio.gather(handle_local(client_reader, remote_writer, client_writer), handle_remote(client_writer, remote_reader, remote_writer))
+        except Exception as exc:
                 logExc(exc)
                 client_writer.close()
                 remote_writer.close()
+    except program_err as exc:
+        logger.info(f'{log_hint} {exc}')
+        await client_writer.close()
+        await remote_writer.close()
+    except OSError:
+        log.info(f'{log_hint} connect fail')
+        await client_writer.close()
     except Exception as exc:
-            logExc(exc)
-            logger.debug(exc)
-            resp = '\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00'.encode()
-            logger.debug('respon to client: {}'.format(resp))
-            client_writer.write(resp)
-            await client_writer.drain()
+        logger.error(f'{traceback.format_exc()}')
+        exit(1)
 
 async def main():
     server = await asyncio.start_server(

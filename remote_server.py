@@ -37,7 +37,7 @@ async def handle_remote(writer, remote_reader,remote_writer):
 async def handle(reader, writer):
     req = await reader.readline()
     req = bytes.decode(req)
-    addr = req[:-2].split(":")
+    addr = req[:-2].split()
     logger.info(f'remote server receive request {req[:-2]}')
     host, port = addr[0], int(addr[1])
     username, password = addr[2], addr[3]
@@ -46,8 +46,8 @@ async def handle(reader, writer):
     assert password==row[0]
     remote_reader, remote_writer = await asyncio.open_connection(host, port)
     bind_host, bind_port, *_ = remote_writer.get_extra_info('sockname')
-    logger.debug(f'connect to {host}:{port}, with {bind_host}:{bind_port}')
-    writer.write(f'{bind_host}:{bind_port}\r\n'.encode())
+    logger.debug(f'connect to {host} {port}, with {bind_host} {bind_port}')
+    writer.write(f'{bind_host} {bind_port}\r\n'.encode())
     await writer.drain()
     try:
         await asyncio.gather(handle_local(reader, remote_writer,writer), handle_remote(writer, remote_reader,remote_writer))
