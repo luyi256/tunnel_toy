@@ -15,15 +15,12 @@ READ_MODE = Enum(
     'readmode', ('EXACT', 'LINE', 'MAX', 'UNTIL')
 )
 
-
 class program_err(Exception):
     print(Exception)
-
 
 def logExc(exc):
     if args.logExc:
         logger.error(f'{traceback.format_exc()}')
-
 
 async def handle_local(client_reader, remote_writer, client_writer):
     while True:
@@ -36,7 +33,7 @@ async def handle_local(client_reader, remote_writer, client_writer):
             await aio_write(remote_writer,req_data)
         except Exception as exc:
             logger.debug(exc)
-
+            return
 
 async def handle_remote(client_writer, remote_reader, remote_writer):
     while True:
@@ -49,7 +46,7 @@ async def handle_remote(client_writer, remote_reader, remote_writer):
             await aio_write(client_writer,resp_data)
         except Exception as exc:
             logger.debug(exc)
-
+            return
 
 async def aio_read(reader, read_mode, *, log_hint=None, exact_data=None, read_len=None, until_str=b'\r\n'):
     data = None
@@ -108,20 +105,21 @@ async def handle(client_reader, client_writer):
             atyp = await aio_read(client_reader, READ_MODE.EXACT, read_len=1, log_hint=f'atyp')
             if atyp == b'\x01':  # IPv4
                 temp_addr = await aio_read(client_reader, READ_MODE.EXACT, read_len=4, log_hint='ipv4')
-                remote_host = str(ipaddress.ip_address(dstHost))
+                remote_host = str(ipaddress.ip_address(temp_addr))
             elif atyp == b'\x03':  # domain
                 domain_len = await aio_read(client_reader, READ_MODE.EXACT, read_len=1, log_hint='domain len')
                 remote_host = await aio_read(client_reader, READ_MODE.EXACT, read_len=domain_len[0], log_hint='domain')
                 remote_host = remote_host.decode('utf8')
             elif atyp == b'\x04':  # IPv6
                 temp_addr = await aio_read(client_reader, READ_MODE.EXACT, read_len=16, log_hint='ipv6')
-                remote_host = str(ipaddress.ip_address(dstHost))
+                remote_host = str(ipaddress.ip_address(temp_addr))
             else:
                 raise program_err(f'invalid atyp')
             remote_port = await aio_read(client_reader, READ_MODE.EXACT, read_len=2, log_hint='port')
             remote_port = int.from_bytes(remote_port, 'big')            
         else:
             req = await aio_read(client_reader, READ_MODE.LINE, log_hint='http request')
+            print(req)
             req = bytes.decode(first_byte+req)
             method, uri, protocal, *_ = req.split()
             if method.lower() == 'connect':
@@ -146,17 +144,21 @@ async def handle(client_reader, client_writer):
             bind_domain=bind_host
             bind_host = ipaddress.ip_address(bind_host)
             atyp = b'\x03'
-            host_data=None
+            host_data = None
             try:
                 if bind_host.version == 4:
                     atyp = b'\x01'
                     host_data = struct.pack('!L', int(bind_host))
+                    reply_data = struct.pack(f'!ssss', b'\x05', b'\x00', b'\x00', atyp)+host_data+struct.pack('!H',int(bind_port))
                 else:
                     atyp = b'\x04'
                     host_data = struct.pack('!16s', ipaddress.v6_int_to_packed(int(bind_host)))
+                    reply_data = struct.pack(f'!ssss', b'\x05', b'\x00', b'\x00', atyp)+host_data+struct.pack('!H',int(bind_port))
             except Exception as exc:
+                print(exc)
+                logExc(exc)
                 host_data = struct.pack(f'!B{len(bind_domain)}s', len(bind_domain), bind_domain.encode())
-            reply_data = struct.pack(f'!ssss{len(host_data)}sH', b'\x05', b'\x00', b'\x00', atyp, host_data, bind_port)
+                reply_data = struct.pack(f'!ssss{len(host_data)}sH', b'\x05', b'\x00', b'\x00', atyp, host_data, int(bind_port))
             await aio_write(client_writer, reply_data, log_hint='reply the bind addr')  
         else:
             await aio_write(client_writer, f'{protocal} 200 OK\r\n\r\n'.encode(), log_hint='response to HTTPS')
@@ -172,7 +174,7 @@ async def handle(client_reader, client_writer):
         await client_writer.close()
         await remote_writer.close()
     except OSError:
-        log.info(f'{log_hint} connect fail')
+        logger.info(f'{log_hint} connect fail')
         await client_writer.close()
     except Exception as exc:
         logger.error(f'{traceback.format_exc()}')
@@ -200,6 +202,7 @@ if __name__ == '__main__':
         '%(asctime)s %(levelname).1s %(lineno)-3d %(funcName)-20s %(message)s')
     handler.setFormatter(formatter)
     logger.addHandler(handler)
+    # 输出log到标准控制流
     chlr = logging.StreamHandler()
     logger.addHandler(chlr)
 
@@ -226,3 +229,5 @@ if __name__ == '__main__':
         asyncio.set_event_loop(asyncio.ProactorEventLoop())
 
     asyncio.run(main())
+
+#  python local_server.py --listen_port 8888 --remote_port 8889 --remote_ip 127.0.0.1 --user aaaa 
