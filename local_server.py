@@ -10,6 +10,8 @@ import sys
 import traceback
 import ipaddress
 SOCKS_VER = 5
+import websockets
+import time
 
 READ_MODE = Enum(
     'readmode', ('EXACT', 'LINE', 'MAX', 'UNTIL')
@@ -23,26 +25,48 @@ def logExc(exc):
         logger.error(f'{traceback.format_exc()}')
 
 async def handle_local(client_reader, remote_writer, client_writer):
+    global gSendBandwidth
+    global send_last
+    global send_remain
     while True:
         try:
             req_data = await aio_read(client_reader, READ_MODE.MAX, read_len=4096)
+            now = time.time()
+            try:
+                gSendBandwidth = (len(req_data)+send_remain) / (now - send_last)
+                print(f'send:{gSendBandwidth} ')
+                send_last = time.time()
+                send_remain=0
+            except:# 时间间隔太短，浮点数除于0
+                send_remain=len(req_data)
             if not req_data:
                 return
             client_addr = client_writer.get_extra_info('peername')
-            logger.debug('client {} want: {}'.format(client_addr, req_data[0:8]))
+            # logger.debug('client {} want: {}'.format(client_addr, req_data[0:8]))
             await aio_write(remote_writer,req_data)
         except Exception as exc:
             logger.debug(exc)
             return
 
 async def handle_remote(client_writer, remote_reader, remote_writer):
+    global gRecvBandwidth
+    global recv_last
+    global recv_remain
     while True:
         try:
             resp_data = await aio_read(remote_reader, READ_MODE.MAX, read_len=4096)
+            now = time.time()
+            try:
+                gRecvBandwidth = (len(resp_data) + recv_remain) / (now - recv_last)
+                recv_last = time.time()
+                recv_remain=0
+            except:
+                recv_remain=len(resp_data)
+                pass
             if not resp_data:
                 return
             server_addr = remote_writer.get_extra_info('peername')
-            logger.debug('server {} resp: {}'.format(server_addr, resp_data[0:8]))
+            # logger.debug('server {} resp: {}'.format(server_addr, resp_data[0:8]))
             await aio_write(client_writer,resp_data)
         except Exception as exc:
             logger.debug(exc)
@@ -82,10 +106,9 @@ async def aio_write(writer, data=None, *, log_hint=None):
         writer.write(data)
         await writer.drain()
     except ConnectionAbortedError as exc:
-        raise program_errk(f'EXC={exc} {log_hint}')
+        raise program_err(f'EXC={exc} {log_hint}')
     except Exception as exc:
         logger.debug(exc)
-
 
 async def handle(client_reader, client_writer):
     client_host, client_port, *_ = client_writer.get_extra_info('peername')
@@ -93,7 +116,7 @@ async def handle(client_reader, client_writer):
     first_byte = await aio_read(client_reader, READ_MODE.EXACT, read_len=1, log_hint=f'first byte from {client_host} {client_port}')
     log_hint=f'{client_host} {client_port}'
     remote_host = None
-    remote_port=None
+    remote_port = None
     try:
         if first_byte == b'\x05':
             proxy_protocal = 'SOCKS5'
@@ -119,7 +142,6 @@ async def handle(client_reader, client_writer):
             remote_port = int.from_bytes(remote_port, 'big')            
         else:
             req = await aio_read(client_reader, READ_MODE.LINE, log_hint='http request')
-            print(req)
             req = bytes.decode(first_byte+req)
             method, uri, protocal, *_ = req.split()
             if method.lower() == 'connect':
@@ -133,13 +155,14 @@ async def handle(client_reader, client_writer):
         logger.info(f'{log_hint} connect to {remote_host} {remote_port}')
 
         remote_reader, remote_writer = await asyncio.open_connection(args.remote_server_ip, args.remote_server_port)
-        await aio_write(remote_writer, f'{remote_host} {remote_port} {args.username} {password}\r\n'.encode(),
+        await aio_write(remote_writer, f'{remote_host} {remote_port} {args.username} {args.password}\r\n'.encode(),
             log_hint=f'{log_hint} connect to remote server, {remote_host} {remote_port}')
         reply_bindaddr = await aio_read(remote_reader, READ_MODE.LINE, log_hint='remote server reply the bind addr')
         reply_bindaddr = bytes.decode(reply_bindaddr)
         addr = reply_bindaddr[:-2].split()
         bind_host, bind_port=addr[0],addr[1]
         logger.info(f'{log_hint} bind at {bind_host} {bind_port}')
+
         if proxy_protocal == 'SOCKS5':
             bind_domain=bind_host
             bind_host = ipaddress.ip_address(bind_host)
@@ -155,11 +178,11 @@ async def handle(client_reader, client_writer):
                     host_data = struct.pack('!16s', ipaddress.v6_int_to_packed(int(bind_host)))
                     reply_data = struct.pack(f'!ssss', b'\x05', b'\x00', b'\x00', atyp)+host_data+struct.pack('!H',int(bind_port))
             except Exception as exc:
-                print(exc)
                 logExc(exc)
                 host_data = struct.pack(f'!B{len(bind_domain)}s', len(bind_domain), bind_domain.encode())
                 reply_data = struct.pack(f'!ssss{len(host_data)}sH', b'\x05', b'\x00', b'\x00', atyp, host_data, int(bind_port))
-            await aio_write(client_writer, reply_data, log_hint='reply the bind addr')  
+
+            await aio_write(client_writer, reply_data, log_hint='reply the bind addr')
         else:
             await aio_write(client_writer, f'{protocal} 200 OK\r\n\r\n'.encode(), log_hint='response to HTTPS')
             
@@ -180,14 +203,42 @@ async def handle(client_reader, client_writer):
         logger.error(f'{traceback.format_exc()}')
         exit(1)
 
+
+async def local_console(ws, path):
+    try:
+        while True:
+            await asyncio.sleep(1)
+            msg = await ws.send(f'{round(gSendBandwidth,2)} {round(gRecvBandwidth,2)}')
+    except websockets.exceptions.ConnectionClosedError as exc:
+        logger.error(f'web1 {exc}')
+    except websockets.exceptions.ConnectionClosedOK as exc:
+        logger.error(f'web2 {exc}')
+    except Exception:
+        logger.error(f'web3 {traceback.format_exc()}')
+        exit(1)
+
 async def main():
+    global gSendBandwidth
+    global gRecvBandwidth
+    gRecvBandwidth = 0
+    gSendBandwidth = 0
+    global send_last
+    global recv_last
+    send_last = time.time()
+    recv_last = time.time()
+    global send_remain
+    global recv_remain
+    send_remain = 0
+    recv_remain = 0
+    if args.console_port:
+        ws_server = await websockets.serve(local_console, '127.0.0.1', args.console_port)
+        logger.info(f'CONSOLE LISTEN {ws_server.sockets[0].getsockname()}')
     server = await asyncio.start_server(
         handle, host=args.listen_ip, port=args.listen_port)
     addr = server.sockets[0].getsockname()
     logger.info(f'Serving on {addr[1]}')
     async with server:
         await server.serve_forever()
-
 
 if __name__ == '__main__':
 
@@ -220,14 +271,16 @@ if __name__ == '__main__':
                          metavar='remote_server_port', required=True, help='remote server port')
     _parser.add_argument('--user', dest='username',
                          metavar='username', required=True, help='username')
+    _parser.add_argument('--password', dest='password',
+                         metavar='password', required=True, help='password')
+    _parser.add_argument('--console_port', dest='console_port',
+                         metavar='console_port', required=True, help='console_port')                     
     args = _parser.parse_args()
     logger.debug(f'{args}')
-
-    password = input("please input your password:\n")
 
     if sys.platform == 'win32':
         asyncio.set_event_loop(asyncio.ProactorEventLoop())
 
     asyncio.run(main())
 
-#  python local_server.py --listen_port 8888 --remote_port 8889 --remote_ip 127.0.0.1 --user aaaa 
+#  python local_server.py --listen_port 8888 --remote_port 8889 --remote_ip 127.0.0.1 --user aaaa --pw bbbb

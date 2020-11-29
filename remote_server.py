@@ -155,7 +155,7 @@ async def main():
     global db
     db = await aiosqlite3.connect("user.db")
     await db.execute("delete from user")
-    await db.execute("insert into user values('aaaa','bbbb',5000)")
+    await db.execute("insert into user values('aaaa','bbbb',100000)")
     cursor = await db.execute("select * from user")
     row=await cursor.fetchone()
     while row:
