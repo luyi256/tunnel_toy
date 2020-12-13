@@ -129,7 +129,6 @@ async def handle(client_reader, client_writer):
     username, password = addr[2], addr[3]
     cursor = await db.execute("select password,rate from user where username='%s'" % username)
     row = await cursor.fetchone()
-    print(row)
     assert password == row[0]
     rate = row[1]
     print(rate)
@@ -154,13 +153,6 @@ async def handle(client_reader, client_writer):
 async def main():
     global db
     db = await aiosqlite3.connect("user.db")
-    await db.execute("delete from user")
-    await db.execute("insert into user values('aaaa','bbbb',100000)")
-    cursor = await db.execute("select * from user")
-    row=await cursor.fetchone()
-    while row:
-        print(row)
-        row=await cursor.fetchone()
     global dict
     dict={'':None}
     server = await asyncio.start_server(
